@@ -7,6 +7,19 @@ library(lubridate)
 library(tibble)
 library(readr)
 
+# Database connection setup for PowerFAIDS
+# Note: This should be configured with actual connection parameters
+con <- tryCatch({
+  dbConnect(odbc(),
+            driver = "SQL Server", # or appropriate driver
+            server = Sys.getenv("POWERFAIDS_SERVER", "localhost"),
+            database = Sys.getenv("POWERFAIDS_DB", "PowerFAIDS"),
+            trusted_connection = "yes")
+}, error = function(e) {
+  warning("Database connection failed: ", e$message)
+  NULL
+})
+
 
 map_it <- function(df) {
   # Helper function to capture structure summary
@@ -41,6 +54,35 @@ map_it <- function(df) {
 }
 table <- function(...) {
   base::table(..., useNA = "ifany")
+}
+
+# Fork function: Creates alternative processing paths for data analysis
+fork_analysis <- function(data, fork_type = "both") {
+  if (is.null(data)) {
+    return(list(financial_aid = NULL, demographic = NULL))
+  }
+  
+  results <- list()
+  
+  # Financial Aid Analysis Fork
+  if (fork_type %in% c("financial", "both")) {
+    results$financial_aid <- data %>%
+      select(starts_with("fm_"), starts_with("im_"), 
+             award_year_token, tot_budget, tot_inst_grants_awd, 
+             tot_loans_awd, award_calc) %>%
+      filter(!is.na(fm_stu_cc_efc) | !is.na(im_stu_cc_efc))
+  }
+  
+  # Demographic Analysis Fork  
+  if (fork_type %in% c("demographic", "both")) {
+    results$demographic <- data %>%
+      select(alternate_id, student_token, award_year_token,
+             fm_par_num_in_family, fm_par_marital_status,
+             fm_dependency_status, packaging_status) %>%
+      filter(!is.na(alternate_id))
+  }
+  
+  return(results)
 }
 
 
@@ -115,25 +157,60 @@ WHERE (stu_award_year.award_year_token = 2024)
 "
 }
 
-result_f <- dbGetQuery(con, query_2)
-glimpse(result_f)
+# Execute query with error handling
+result_f <- if (!is.null(con)) {
+  tryCatch({
+    dbGetQuery(con, query_2)
+  }, error = function(e) {
+    warning("Query execution failed: ", e$message)
+    NULL
+  })
+} else {
+  warning("No database connection available")
+  NULL
+}
 
-result_f <- as.data.frame(result_f)
-dim(result_f)
+if (!is.null(result_f)) {
+  glimpse(result_f)
+  
+  result_f <- as.data.frame(result_f)
+  dim(result_f)
+  
+  # Convert  date columns manually
+  result_f$date_awd_letter <- as.Date(result_f$date_awd_letter, format = "%Y-%m-%d")
+  result_f$date_packaged <- as.Date(result_f$date_packaged, format = "%Y-%m-%d")
+  # result_f$application_recvd_dt <- as.Date(result_f$application_recvd_dt, format = "%Y-%m-%d")
+  # result_f$verif_date <- as.Date(result_f$verif_date, format = "%Y-%m-%d")
+  
+  
+  View(map_it(result_f))
+  
+  table(result_f$award_year_token)
+  table(result_f$packaging_status)
+  
+  # Create analysis forks for specialized processing
+  analysis_forks <- fork_analysis(result_f, "both")
+  
+  # Process financial aid fork
+  if (!is.null(analysis_forks$financial_aid)) {
+    message("Financial Aid Analysis Fork - Processing ", 
+            nrow(analysis_forks$financial_aid), " records")
+    # Additional financial aid specific analysis could go here
+  }
+  
+  # Process demographic fork  
+  if (!is.null(analysis_forks$demographic)) {
+    message("Demographic Analysis Fork - Processing ", 
+            nrow(analysis_forks$demographic), " records")
+    # Additional demographic specific analysis could go here
+  }
+} else {
+  message("Skipping data processing due to database connection issues")
+}
 
-# Convert  date columns manually
-result_df$date_awd_letter <- as.Date(result$date_awd_letter, format = "%Y-%m-%d")
-result_df$date_packaged <- as.Date(result$date_packaged, format = "%Y-%m-%d")
-# result_df$application_recvd_dt <- as.Date(result$application_recvd_dt, format = "%Y-%m-%d")
-# result_df$verif_date <- as.Date(result$verif_date, format = "%Y-%m-%d")
 
 
-View(map_it(result_df))
-
-table(result_df$award_year_token)
-table(result_df$packaging_status)
-
-
-
-
-dbDisconnect(con)
+# Safely disconnect from database
+if (!is.null(con)) {
+  dbDisconnect(con)
+}
